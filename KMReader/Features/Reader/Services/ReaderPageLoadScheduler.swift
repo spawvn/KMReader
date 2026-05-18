@@ -47,7 +47,11 @@ final class ReaderPageLoadScheduler {
   private var visiblePageIDs: [ReaderPageID] = []
 
   #if os(iOS) || os(tvOS)
-    private var memoryWarningObserver: NSObjectProtocol?
+    // `Task<Void, Never>` is Sendable, so this property is reachable from
+    // the nonisolated `deinit` even though the class is `@MainActor`. The
+    // older `addObserver(forName:object:queue:using:)` pattern returns a
+    // non-Sendable `NSObjectProtocol`, which would not be.
+    private nonisolated let memoryWarningObservation: Task<Void, Never>
   #endif
 
   init(
@@ -62,15 +66,30 @@ final class ReaderPageLoadScheduler {
     self.keepRangeAfter = keepRangeAfter
 
     #if os(iOS) || os(tvOS)
-      installMemoryWarningObserver()
+      // `UIApplication.didReceiveMemoryWarningNotification` is posted by
+      // UIKit when the system needs memory back. Without this observation,
+      // iOS's only recourse is to evict view bodies / hosting controllers —
+      // which forces a full `DivinaReaderView` rebuild and exercises the
+      // exact path PR #818 fixed against. Responding explicitly lets us
+      // release the in-memory bitmap cache (~10 decoded pages, frequently
+      // tens of MB each) gracefully without disturbing the view tree.
+      //
+      // The Task suspends on the AsyncSequence until a notification fires;
+      // `deinit` cancels the task, which terminates the iteration.
+      self.memoryWarningObservation = Task { @MainActor [weak self] in
+        for await _ in NotificationCenter.default.notifications(
+          named: UIApplication.didReceiveMemoryWarningNotification
+        ) {
+          guard !Task.isCancelled else { break }
+          self?.handleMemoryWarning()
+        }
+      }
     #endif
   }
 
   deinit {
     #if os(iOS) || os(tvOS)
-      if let memoryWarningObserver {
-        NotificationCenter.default.removeObserver(memoryWarningObserver)
-      }
+      memoryWarningObservation.cancel()
     #endif
   }
 
@@ -226,25 +245,6 @@ final class ReaderPageLoadScheduler {
   }
 
   #if os(iOS) || os(tvOS)
-    private func installMemoryWarningObserver() {
-      // `UIApplication.didReceiveMemoryWarningNotification` is posted by
-      // UIKit when the system needs memory back. Without a hook here, iOS's
-      // only recourse is to evict view bodies / hosting controllers —
-      // which forces a full `DivinaReaderView` rebuild and exercises the
-      // exact path PR #818 fixed against. Responding explicitly lets us
-      // release the in-memory bitmap cache (~10 decoded pages, frequently
-      // tens of MB each) gracefully without disturbing the view tree.
-      memoryWarningObserver = NotificationCenter.default.addObserver(
-        forName: UIApplication.didReceiveMemoryWarningNotification,
-        object: nil,
-        queue: nil
-      ) { [weak self] _ in
-        Task { @MainActor [weak self] in
-          self?.handleMemoryWarning()
-        }
-      }
-    }
-
     private func handleMemoryWarning() {
       logger.warning("⚠️ [Reader/Memory] Received memory warning; pruning to visible pages only")
       pruneToVisiblePagesOnly()
