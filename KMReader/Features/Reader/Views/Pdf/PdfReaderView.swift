@@ -426,14 +426,12 @@
     }
 
     private var loadingProgress: Double? {
-      if viewModel.loadingStage == .processingOfflineFiles {
-        return 1.0
+      guard viewModel.loadingStage == .downloading else { return nil }
+      if let expectedBytes = viewModel.downloadBytesExpected, expectedBytes > 0 {
+        return viewModel.downloadProgress
       }
 
-      guard viewModel.downloadBytesReceived > 0 || viewModel.downloadProgress > 0 else {
-        return nil
-      }
-      return viewModel.downloadProgress
+      return viewModel.downloadProgress > 0 ? viewModel.downloadProgress : nil
     }
 
     private var loadingDetail: String? {
