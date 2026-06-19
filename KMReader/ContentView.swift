@@ -6,6 +6,11 @@
 import SwiftUI
 
 struct ContentView: View {
+  private enum ProtectedAccessGate: Equatable {
+    case checking
+    case unlocked(instanceId: String, protected: Bool)
+  }
+
   let authViewModel: AuthViewModel
   let readerPresentation: ReaderPresentationManager
   @Environment(\.scenePhase) private var scenePhase
@@ -17,6 +22,7 @@ struct ContentView: View {
   @AppStorage("privacyProtection") private var privacyProtection: Bool = false
 
   @State private var showPrivacyBlur = false
+  @State private var protectedAccessGate: ProtectedAccessGate = .checking
 
   #if os(iOS) || os(tvOS)
     @Namespace private var zoomNamespace
@@ -34,7 +40,30 @@ struct ContentView: View {
   }
 
   private var isReady: Bool {
-    (authViewModel.bootstrapState == .ready || isOffline) && !syncViewModel.isSyncing
+    hasRenderableAccessForCurrentInstance
+      && (authViewModel.bootstrapState == .ready || isOffline)
+      && !syncViewModel.isSyncing
+  }
+
+  private var hasRenderableAccessForCurrentInstance: Bool {
+    guard case .unlocked(let instanceId, _) = protectedAccessGate else {
+      return false
+    }
+    return instanceId == current.instanceId
+  }
+
+  private var shouldReauthenticateProtectedCurrentInstance: Bool {
+    guard case .unlocked(let instanceId, let protected) = protectedAccessGate else {
+      return false
+    }
+    return instanceId == current.instanceId
+      && protected
+      && !LocalDeviceAuthenticationService.shared.hasProtectedAccess
+  }
+
+  private var protectedAccessTaskID: String {
+    guard isLoggedIn else { return "logged-out" }
+    return current.instanceId
   }
 
   private var automaticReadingHistorySyncTrigger: String {
@@ -75,8 +104,9 @@ struct ContentView: View {
             }
           }
         }
-        .task(id: isLoggedIn) {
+        .task(id: protectedAccessTaskID) {
           guard isLoggedIn else { return }
+          guard await unlockProtectedCurrentInstanceForRendering() else { return }
 
           if authViewModel.bootstrapState == .requiresValidation {
             let serverReachable = await authViewModel.loadCurrentUser()
@@ -94,7 +124,7 @@ struct ContentView: View {
           if enableSSE && !isOffline {
             await SSEService.shared.connect()
           }
-          WidgetDataService.refreshWidgetData()
+          await ExternalContentSurfaceService.refreshWidgetsForCurrentInstance()
 
           // Wire automatic recovery from auto-entered offline mode. The
           // primary mechanism is `OfflineRecoveryService`'s backoff probe
@@ -155,9 +185,15 @@ struct ContentView: View {
         }
         .onChange(of: scenePhase) { _, phase in
           if phase == .active {
+            let shouldReauthenticate = shouldReauthenticateProtectedCurrentInstance
+            if shouldReauthenticate {
+              protectedAccessGate = .checking
+            }
+
             withAnimation(.easeInOut(duration: 0.2)) {
               showPrivacyBlur = false
             }
+
             // Wake the recovery loop if we're in auto-offline. Catches the
             // case where the loop's `Task.sleep` was deferred by iOS while
             // the app was suspended, or where a path-monitor transition fired
@@ -166,6 +202,12 @@ struct ContentView: View {
               OfflineRecoveryService.shared.wakeNow()
             }
             Task {
+              if shouldReauthenticate {
+                guard await unlockProtectedCurrentInstanceForRendering() else { return }
+              } else {
+                guard hasRenderableAccessForCurrentInstance else { return }
+              }
+
               if let database = await DatabaseOperator.databaseIfConfigured() {
                 await database.updateInstanceLastUsed(instanceId: AppConfig.current.instanceId)
               }
@@ -175,9 +217,8 @@ struct ContentView: View {
                   instanceId: AppConfig.current.instanceId, restart: true)
               }
               await syncViewModel.syncReadingProgressOnly()
-            }
-            if enableSSE && !isOffline {
-              Task {
+
+              if enableSSE && !isOffline {
                 await SSEService.shared.connect()
               }
             }
@@ -191,8 +232,8 @@ struct ContentView: View {
             }
             Task(priority: .utility) {
               await SSEService.shared.disconnect(notify: false)
+              await ExternalContentSurfaceService.refreshWidgetsForCurrentInstance()
             }
-            WidgetDataService.refreshWidgetData()
           }
         }
       } else {
@@ -281,5 +322,53 @@ struct ContentView: View {
     // `triggerSync` for offline downloads once the flag transitions back to
     // online; nothing else to do here.
     return .recovered
+  }
+
+  private func unlockProtectedCurrentInstanceForRendering() async -> Bool {
+    guard isLoggedIn else {
+      protectedAccessGate = .checking
+      return false
+    }
+
+    let instanceId = current.instanceId
+    protectedAccessGate = .checking
+
+    guard !instanceId.isEmpty else {
+      protectedAccessGate = .unlocked(instanceId: instanceId, protected: false)
+      return true
+    }
+
+    let result = await authenticateProtectedCurrentInstanceIfNeeded(instanceId: instanceId)
+    guard result.authenticated else { return false }
+    guard isLoggedIn, current.instanceId == instanceId else { return false }
+
+    protectedAccessGate = .unlocked(instanceId: instanceId, protected: result.protected)
+    return true
+  }
+
+  private func authenticateProtectedCurrentInstanceIfNeeded(
+    instanceId: String
+  ) async -> (authenticated: Bool, protected: Bool) {
+    guard isLoggedIn, !instanceId.isEmpty else { return (true, false) }
+
+    do {
+      let database = try await DatabaseOperator.database()
+      let protected = try await database.isServerProtected(instanceId: instanceId)
+      guard protected else { return (true, false) }
+
+      let authenticated = await LocalDeviceAuthenticationService.shared.authenticateProtectedAccess(
+        reason: String(localized: "Authenticate to unlock this protected server.")
+      )
+      guard authenticated else {
+        authViewModel.logout(clearCurrent: true)
+        return (false, true)
+      }
+
+      return (true, true)
+    } catch {
+      ErrorManager.shared.alert(error: error)
+      authViewModel.logout(clearCurrent: true)
+      return (false, true)
+    }
   }
 }

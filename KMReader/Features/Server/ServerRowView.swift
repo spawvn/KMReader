@@ -55,6 +55,14 @@ struct ServerRowView: View {
               ? String(localized: "API Key") : String(localized: "Username & Password"),
             textColor: .secondary
           )
+          if instance.protected {
+            infoDetailRow(
+              icon: "lock.fill",
+              text: String(localized: "Protected"),
+              textColor: .orange,
+              iconColor: .orange
+            )
+          }
           infoDetailRow(
             icon: "clock.arrow.circlepath", text: lastUsedDescription,
             textColor: .secondary)
@@ -142,11 +150,16 @@ struct ServerRowView: View {
     )
   }
 
-  private func infoDetailRow(icon: String, text: String, textColor: Color = .primary) -> some View {
+  private func infoDetailRow(
+    icon: String,
+    text: String,
+    textColor: Color = .primary,
+    iconColor: Color = .secondary
+  ) -> some View {
     HStack(alignment: .top, spacing: 8) {
       Image(systemName: icon)
         .font(.footnote.weight(.semibold))
-        .foregroundStyle(.secondary)
+        .foregroundStyle(iconColor)
         .frame(width: 16)
       Text(text)
         .font(.footnote)

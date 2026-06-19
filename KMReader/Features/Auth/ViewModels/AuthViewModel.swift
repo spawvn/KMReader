@@ -75,17 +75,23 @@ class AuthViewModel {
     )
   }
 
-  func logout() {
+  func logout(clearCurrent: Bool = false) {
+    LocalDeviceAuthenticationService.shared.clearProtectedAccess()
     Task {
       // Disconnect SSE before logout
       await SSEService.shared.disconnect()
-      try? await AuthService.logout()
+      try? await AuthService.logout(clearCurrent: clearCurrent)
     }
     // ViewModel-specific cleanup
     AppConfig.isLoggedIn = false
-    var current = AppConfig.current
-    current.clearUserMetadata()
-    AppConfig.current = current
+    AppConfig.showProtectedServers = false
+    if clearCurrent {
+      AppConfig.current = Current()
+    } else {
+      var current = AppConfig.current
+      current.clearUserMetadata()
+      AppConfig.current = current
+    }
     bootstrapState = .requiresValidation
   }
 
@@ -140,6 +146,13 @@ class AuthViewModel {
   }
 
   func switchTo(instance: ServerDisplayItem) async -> Bool {
+    if instance.protected {
+      let authenticated = await LocalDeviceAuthenticationService.shared.authenticateProtectedAccess(
+        reason: String(localized: "Authenticate to switch to this protected server.")
+      )
+      guard authenticated else { return false }
+    }
+
     isSwitching = true
     switchingInstanceId = instance.instanceId
     defer {
@@ -169,6 +182,7 @@ class AuthViewModel {
         displayName: instance.displayName,
         instanceId: instance.instanceId,
         shouldPersistInstance: false,
+        protected: instance.protected,
         successMessage: String(localized: "Switched to \(instance.name)")
       )
 
@@ -205,6 +219,9 @@ class AuthViewModel {
         current.clearUserMetadata()
         AppConfig.current = current
         bootstrapState = .ready
+        if instance.protected {
+          ExternalContentSurfaceService.clearAll()
+        }
 
         ErrorManager.shared.notify(
           message: String(localized: "Server unreachable, switched to offline mode")
@@ -230,6 +247,7 @@ class AuthViewModel {
     displayName: String?,
     instanceId: String? = nil,
     shouldPersistInstance: Bool,
+    protected: Bool = false,
     successMessage: String
   ) async throws {
     // Update AppConfig only after validation succeeds
@@ -238,6 +256,7 @@ class AuthViewModel {
 
     let finalInstanceId: String
     let finalDisplayName: String
+    let finalProtected: Bool
 
     // Persist instance if this is a new login
     if shouldPersistInstance {
@@ -251,9 +270,11 @@ class AuthViewModel {
       )
       finalInstanceId = instanceSummary.id.uuidString
       finalDisplayName = instanceSummary.displayName
+      finalProtected = instanceSummary.protected
     } else {
       finalInstanceId = instanceId ?? AppConfig.current.instanceId
       finalDisplayName = displayName ?? ""
+      finalProtected = protected
     }
 
     AppConfig.current = Current(
@@ -293,11 +314,10 @@ class AuthViewModel {
     await SSEService.shared.disconnect()
     await SSEService.shared.connect()
 
-    WidgetDataService.refreshWidgetData()
-    #if os(iOS) || os(macOS)
-      SpotlightIndexService.removeAllItems()
-      SpotlightIndexService.indexAllDownloadedBooks(instanceId: finalInstanceId)
-    #endif
+    ExternalContentSurfaceService.updateAfterSelectingInstance(
+      instanceId: finalInstanceId,
+      protected: finalProtected
+    )
   }
 
   func updatePassword(password: String) async throws {
