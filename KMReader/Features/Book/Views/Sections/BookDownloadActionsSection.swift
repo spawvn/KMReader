@@ -8,8 +8,19 @@ import SwiftUI
 struct BookDownloadActionsSection: View {
   let book: Book
   let status: DownloadStatus
+  let protectionSources: [OfflineProtectionSource]
 
   @AppStorage("currentAccount") private var current: Current = .init()
+
+  init(
+    book: Book,
+    status: DownloadStatus,
+    protectionSources: [OfflineProtectionSource] = []
+  ) {
+    self.book = book
+    self.status = status
+    self.protectionSources = protectionSources
+  }
 
   var body: some View {
     HStack {
@@ -27,16 +38,17 @@ struct BookDownloadActionsSection: View {
         }
       }
       .font(.caption)
-      .adaptiveButtonStyle(status.isDownloaded || status.isPending ? .bordered : .borderedProminent)
+      .adaptiveButtonStyle(.bordered)
       .tint(status.menuColor)
 
       Spacer()
 
-      InfoChip(
+      OfflineProtectionStatusChip(
         label: status.displayLabel,
         systemImage: status.displayIcon,
         backgroundColor: status.displayColor.opacity(0.2),
-        foregroundColor: status.displayColor
+        foregroundColor: status.displayColor,
+        sources: protectionSources
       )
     }
     .padding(.vertical, 4)

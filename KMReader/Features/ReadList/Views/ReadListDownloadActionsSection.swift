@@ -41,7 +41,7 @@ struct ReadListDownloadActionsSection: View {
           }
         }
         .font(.caption)
-        .adaptiveButtonStyle(status.isProminent ? .borderedProminent : .bordered)
+        .adaptiveButtonStyle(.bordered)
 
         Menu {
           Button {
