@@ -370,12 +370,13 @@ final class ReaderPresentationManager {
       if postsContentProjectionChange {
         await ContentProjectionNotifier.postBooksAndSeriesDidChange(
           bookIds: Array(bookIds),
-          instanceId: session.instanceId
+          instanceId: session.instanceId,
+          reason: .readingProgress
         )
       }
       await SyncService.syncVisitedItems(bookIds: bookIds, seriesIds: seriesIds)
       if postsContentProjectionChange {
-        await DashboardSectionRefreshNotifier.postReadingProgressChanged(
+        await DashboardSectionRefreshNotifier.postReadStatusChanged(
           source: .manual,
           reason: "Reader closed after progress sync"
         )

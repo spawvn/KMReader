@@ -34,7 +34,7 @@ struct BooksBrowseView: View {
       BooksQueryView(
         libraryIds: libraryIds,
         searchText: searchText,
-        browseOpts: (searchIgnoreFilters && !searchText.isEmpty) ? BookBrowseOptions() : browseOpts,
+        browseOpts: effectiveBrowseOpts,
         browseLayout: browseLayout,
         viewModel: viewModel
       )
@@ -79,6 +79,10 @@ struct BooksBrowseView: View {
     }
   }
 
+  private var effectiveBrowseOpts: BookBrowseOptions {
+    (searchIgnoreFilters && !searchText.isEmpty) ? BookBrowseOptions() : browseOpts
+  }
+
   private var initializationKey: String {
     [
       libraryIds.joined(separator: ","),
@@ -87,8 +91,6 @@ struct BooksBrowseView: View {
   }
 
   private func loadBooks(refresh: Bool) async {
-    let effectiveBrowseOpts =
-      (searchIgnoreFilters && !searchText.isEmpty) ? BookBrowseOptions() : browseOpts
     await viewModel.loadBrowseBooks(
       browseOpts: effectiveBrowseOpts,
       searchText: searchText,

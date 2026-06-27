@@ -33,8 +33,7 @@ struct SeriesBrowseView: View {
       SeriesQueryView(
         libraryIds: libraryIds,
         searchText: searchText,
-        browseOpts: (searchIgnoreFilters && !searchText.isEmpty)
-          ? SeriesBrowseOptions() : browseOpts,
+        browseOpts: effectiveBrowseOpts,
         browseLayout: browseLayout,
         viewModel: viewModel
       )
@@ -79,6 +78,10 @@ struct SeriesBrowseView: View {
     }
   }
 
+  private var effectiveBrowseOpts: SeriesBrowseOptions {
+    (searchIgnoreFilters && !searchText.isEmpty) ? SeriesBrowseOptions() : browseOpts
+  }
+
   private var initializationKey: String {
     [
       libraryIds.joined(separator: ","),
@@ -87,8 +90,6 @@ struct SeriesBrowseView: View {
   }
 
   private func loadSeries(refresh: Bool) async {
-    let effectiveBrowseOpts =
-      (searchIgnoreFilters && !searchText.isEmpty) ? SeriesBrowseOptions() : browseOpts
     await viewModel.loadSeries(
       browseOpts: effectiveBrowseOpts,
       searchText: searchText,

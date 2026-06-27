@@ -18,6 +18,8 @@ final class DashboardRefreshCoordinator {
   private var pendingAutoSections: Set<DashboardSection>?
   private var hasDeferredAutoRefresh = false
   private var deferredAutoSections: Set<DashboardSection>?
+  private var hasDeferredProjectionRefresh = false
+  private var deferredProjectionSections: Set<DashboardSection>?
   private var projectionObserverTasks: [Task<Void, Never>] = []
 
   private init() {
@@ -43,6 +45,7 @@ final class DashboardRefreshCoordinator {
   func readerDidClose(sessionID: UUID) {
     guard activeReaderSessionID == sessionID else { return }
     activeReaderSessionID = nil
+    flushDeferredProjectionRefresh()
     flushDeferredAutoRefresh()
   }
 
@@ -67,6 +70,8 @@ final class DashboardRefreshCoordinator {
       requestManualRefresh(sections: sections, reason: reason)
     case .auto:
       scheduleAutoRefresh(sections: sections, reason: reason)
+    case .projection:
+      requestProjectionRefresh(sections: sections, reason: reason)
     }
   }
 
@@ -85,6 +90,28 @@ final class DashboardRefreshCoordinator {
       command: DashboardSectionReloadCommand(
         id: UUID(),
         source: .manual,
+        sections: sections,
+        reason: reason
+      )
+    )
+  }
+
+  private func requestProjectionRefresh(
+    sections: Set<DashboardSection>?,
+    reason: String
+  ) {
+    logger.debug("Dashboard projection refresh requested: \(reason)")
+    AppConfig.serverLastUpdate = Date()
+
+    if activeReaderSessionID != nil {
+      mergeDeferredProjectionSections(sections)
+      return
+    }
+
+    DashboardSectionRefreshNotifier.postReload(
+      command: DashboardSectionReloadCommand(
+        id: UUID(),
+        source: .projection,
         sections: sections,
         reason: reason
       )
@@ -181,6 +208,22 @@ final class DashboardRefreshCoordinator {
     }
   }
 
+  private func mergeDeferredProjectionSections(_ sections: Set<DashboardSection>?) {
+    if hasDeferredProjectionRefresh, deferredProjectionSections == nil {
+      return
+    }
+    hasDeferredProjectionRefresh = true
+    guard let sections else {
+      deferredProjectionSections = nil
+      return
+    }
+    if let existingSections = deferredProjectionSections {
+      deferredProjectionSections = existingSections.union(sections)
+    } else {
+      deferredProjectionSections = sections
+    }
+  }
+
   private func movePendingAutoRefreshToDeferred() {
     guard pendingAutoRefreshTask != nil else { return }
     mergeDeferredAutoSections(pendingAutoSections)
@@ -200,18 +243,26 @@ final class DashboardRefreshCoordinator {
     )
   }
 
+  private func flushDeferredProjectionRefresh() {
+    guard hasDeferredProjectionRefresh else { return }
+    let sections = deferredProjectionSections
+    hasDeferredProjectionRefresh = false
+    deferredProjectionSections = nil
+
+    AppConfig.serverLastUpdate = Date()
+    DashboardSectionRefreshNotifier.postReload(
+      command: DashboardSectionReloadCommand(
+        id: UUID(),
+        source: .projection,
+        sections: sections,
+        reason: "Reader closed after deferred dashboard projection refresh"
+      )
+    )
+  }
+
   private func startProjectionObservers() {
-    observeProjection(
-      named: .bookProjectionDidChange,
-      sections: DashboardSectionRefreshNotifier.bookContentSections
-        .union(DashboardSectionRefreshNotifier.seriesContentSections),
-      reason: "Book projection changed"
-    )
-    observeProjection(
-      named: .seriesProjectionDidChange,
-      sections: DashboardSectionRefreshNotifier.seriesContentSections,
-      reason: "Series projection changed"
-    )
+    observeBookProjection()
+    observeSeriesProjection()
     observeProjection(
       named: .collectionProjectionDidChange,
       sections: [.pinnedCollections],
@@ -224,6 +275,32 @@ final class DashboardRefreshCoordinator {
     )
   }
 
+  private func observeBookProjection() {
+    projectionObserverTasks.append(
+      Task { @MainActor [weak self] in
+        for await notification in NotificationCenter.default.notifications(named: .bookProjectionDidChange) {
+          let reasons = ContentProjectionNotifier.changeReasons(from: notification)
+          let sections = DashboardSectionRefreshNotifier.sectionsForBookProjectionChange(reasons: reasons)
+          guard !sections.isEmpty else { continue }
+          self?.requestRefresh(sections: sections, source: .projection, reason: "Book projection changed")
+        }
+      }
+    )
+  }
+
+  private func observeSeriesProjection() {
+    projectionObserverTasks.append(
+      Task { @MainActor [weak self] in
+        for await notification in NotificationCenter.default.notifications(named: .seriesProjectionDidChange) {
+          let reasons = ContentProjectionNotifier.changeReasons(from: notification)
+          let sections = DashboardSectionRefreshNotifier.sectionsForSeriesProjectionChange(reasons: reasons)
+          guard !sections.isEmpty else { continue }
+          self?.requestRefresh(sections: sections, source: .projection, reason: "Series projection changed")
+        }
+      }
+    )
+  }
+
   private func observeProjection(
     named name: Notification.Name,
     sections: Set<DashboardSection>,
@@ -232,7 +309,7 @@ final class DashboardRefreshCoordinator {
     projectionObserverTasks.append(
       Task { @MainActor [weak self] in
         for await _ in NotificationCenter.default.notifications(named: name) {
-          self?.requestRefresh(sections: sections, source: .auto, reason: reason)
+          self?.requestRefresh(sections: sections, source: .projection, reason: reason)
         }
       }
     )
