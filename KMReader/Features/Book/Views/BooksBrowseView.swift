@@ -17,6 +17,7 @@ struct BooksBrowseView: View {
   @State private var browseOpts: BookBrowseOptions = BookBrowseOptions()
   @AppStorage("bookBrowseLayout") private var browseLayout: BrowseLayoutMode = .grid
   @AppStorage("searchIgnoreFilters") private var searchIgnoreFilters: Bool = false
+  @AppStorage("isOffline") private var isOffline: Bool = false
 
   @State private var viewModel = BookViewModel()
   @State private var initializedKey: String?
@@ -28,7 +29,9 @@ struct BooksBrowseView: View {
         showFilterSheet: $showFilterSheet,
         showSavedFilters: $showSavedFilters,
         filterType: .books,
-        libraryIds: libraryIds
+        libraryIds: libraryIds,
+        usesRelevanceSort: usesRelevanceSort,
+        ignoresFiltersForSearch: ignoresFiltersForSearch
       ).padding(.horizontal)
 
       BooksQueryView(
@@ -80,7 +83,15 @@ struct BooksBrowseView: View {
   }
 
   private var effectiveBrowseOpts: BookBrowseOptions {
-    (searchIgnoreFilters && !searchText.isEmpty) ? BookBrowseOptions() : browseOpts
+    ignoresFiltersForSearch ? browseOpts.filtersCleared : browseOpts
+  }
+
+  private var usesRelevanceSort: Bool {
+    !isOffline && !searchText.isEmpty
+  }
+
+  private var ignoresFiltersForSearch: Bool {
+    searchIgnoreFilters && !searchText.isEmpty
   }
 
   private var initializationKey: String {
