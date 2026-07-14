@@ -14,6 +14,7 @@ class ReaderViewModel {
   var isolatePages: [Int] = []
   private var isolatePagesByBookId: [String: Set<Int>] = [:]
   private var pageRotationsByBookId: [String: [Int: Int]] = [:]
+  private(set) var bookIdsWithMissingPageDimensions: Set<String> = []
   private var currentPageID: ReaderPageID?
   private var currentViewItemID: ReaderViewItem?
   var navigationTarget: ReaderViewItem?
@@ -123,6 +124,10 @@ class ReaderViewModel {
   func pageRotationDegrees(for pageID: ReaderPageID) -> Int {
     guard let position = isolatePosition(for: pageID) else { return 0 }
     return pageRotationsByBookId[position.bookId]?[position.localIndex] ?? 0
+  }
+
+  func hasMissingPageDimensions(forBookId bookId: String) -> Bool {
+    bookIdsWithMissingPageDimensions.contains(bookId)
   }
 
   var currentPageRotationDegrees: Int {
@@ -589,6 +594,8 @@ class ReaderViewModel {
 
   private func fetchSegmentPages(for book: Book, purpose: SegmentFetchPurpose) async -> [BookPage]? {
     let database = await DatabaseOperator.databaseIfConfigured()
+    let fetchedPages: [BookPage]
+    let shouldRefreshCachedPages: Bool
 
     if AppConfig.offlineFirstReading, purpose.shouldEnsureOfflineReady {
       do {
@@ -598,24 +605,102 @@ class ReaderViewModel {
         return nil
       }
 
-      return await database?.fetchPages(id: book.id)
+      guard let localPages = await database?.fetchPages(id: book.id) else {
+        return nil
+      }
+      fetchedPages = localPages
+      shouldRefreshCachedPages = false
+    } else if let cachedPages = await database?.fetchPages(id: book.id) {
+      fetchedPages = cachedPages
+      shouldRefreshCachedPages = !AppConfig.offlineFirstReading && !AppConfig.isOffline
+    } else {
+      guard !AppConfig.isOffline else {
+        return nil
+      }
+
+      do {
+        fetchedPages = try await BookService.getBookPages(id: book.id)
+        await database?.updateBookPages(bookId: book.id, pages: fetchedPages)
+        shouldRefreshCachedPages = false
+      } catch {
+        logger.error("❌ Failed to preload segment pages for book \(book.id): \(error)")
+        return nil
+      }
     }
 
-    if let cachedPages = await database?.fetchPages(id: book.id) {
-      return cachedPages
+    return await resolvePageDimensions(
+      bookId: book.id,
+      pages: fetchedPages,
+      shouldRefreshCachedPages: shouldRefreshCachedPages
+    )
+  }
+
+  private func resolvePageDimensions(
+    bookId: String,
+    pages: [BookPage],
+    shouldRefreshCachedPages: Bool
+  ) async -> [BookPage] {
+    var resolvedPages = pages
+
+    if shouldRefreshCachedPages,
+      resolvedPages.contains(where: { !$0.hasValidDimensions })
+    {
+      do {
+        let refreshedPages = try await BookService.getBookPages(id: bookId)
+        resolvedPages = preservingKnownDimensions(
+          in: refreshedPages,
+          from: resolvedPages
+        )
+        if let database = await DatabaseOperator.databaseIfConfigured() {
+          await database.updateBookPages(bookId: bookId, pages: resolvedPages)
+        }
+      } catch {
+        logger.warning(
+          "⚠️ Failed to refresh page dimensions from server for book \(bookId): \(error)"
+        )
+      }
     }
 
-    guard !AppConfig.isOffline else {
-      return nil
+    if resolvedPages.contains(where: { !$0.hasValidDimensions }) {
+      resolvedPages = await OfflineManager.shared.fillMissingPageDimensions(
+        instanceId: AppConfig.current.instanceId,
+        bookId: bookId,
+        pages: resolvedPages
+      )
     }
 
-    do {
-      let fetchedPages = try await BookService.getBookPages(id: book.id)
-      await database?.updateBookPages(bookId: book.id, pages: fetchedPages)
-      return fetchedPages
-    } catch {
-      logger.error("❌ Failed to preload segment pages for book \(book.id): \(error)")
-      return nil
+    updateMissingPageDimensionsState(bookId: bookId, pages: resolvedPages)
+    return resolvedPages
+  }
+
+  private func preservingKnownDimensions(
+    in refreshedPages: [BookPage],
+    from cachedPages: [BookPage]
+  ) -> [BookPage] {
+    let cachedDimensionsByFileName = cachedPages.reduce(into: [String: (width: Int, height: Int)]()) {
+      result, page in
+      guard page.hasValidDimensions, let width = page.width, let height = page.height else { return }
+      result[page.fileName] = (width, height)
+    }
+
+    return refreshedPages.map { page in
+      guard !page.hasValidDimensions,
+        let dimensions = cachedDimensionsByFileName[page.fileName]
+      else {
+        return page
+      }
+      return page.withDimensions(width: dimensions.width, height: dimensions.height)
+    }
+  }
+
+  private func updateMissingPageDimensionsState(bookId: String, pages: [BookPage]) {
+    let hasMissingDimensions = pages.contains(where: { !$0.hasValidDimensions })
+    if hasMissingDimensions {
+      guard !bookIdsWithMissingPageDimensions.contains(bookId) else { return }
+      bookIdsWithMissingPageDimensions.insert(bookId)
+    } else {
+      guard bookIdsWithMissingPageDimensions.contains(bookId) else { return }
+      bookIdsWithMissingPageDimensions.remove(bookId)
     }
   }
 
@@ -659,6 +744,7 @@ class ReaderViewModel {
     isolatePages.removeAll()
     isolatePagesByBookId.removeAll()
     pageRotationsByBookId.removeAll()
+    bookIdsWithMissingPageDimensions.removeAll()
     tableOfContents.removeAll()
     tableOfContentsByBookId.removeAll()
     tableOfContentsBookId = nil
@@ -784,15 +870,23 @@ class ReaderViewModel {
       await ensureOfflinePDFMetadataForDivina(book: book)
       let database = await DatabaseOperator.databaseIfConfigured()
 
-      let fetchedPages: [BookPage]
+      let storedPages: [BookPage]
+      let shouldRefreshCachedPages: Bool
       if let localPages = await database?.fetchPages(id: book.id) {
-        fetchedPages = localPages
+        storedPages = localPages
+        shouldRefreshCachedPages = !AppConfig.offlineFirstReading && !AppConfig.isOffline
       } else if !AppConfig.isOffline {
-        fetchedPages = try await BookService.getBookPages(id: book.id)
-        await database?.updateBookPages(bookId: book.id, pages: fetchedPages)
+        storedPages = try await BookService.getBookPages(id: book.id)
+        await database?.updateBookPages(bookId: book.id, pages: storedPages)
+        shouldRefreshCachedPages = false
       } else {
         throw APIError.offline
       }
+      let fetchedPages = await resolvePageDimensions(
+        bookId: book.id,
+        pages: storedPages,
+        shouldRefreshCachedPages: shouldRefreshCachedPages
+      )
 
       let localIsolatePages = await database?.fetchIsolatePages(id: book.id) ?? []
       isolatePagesByBookId[book.id] = Set(localIsolatePages)
